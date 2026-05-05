@@ -41,7 +41,8 @@ static bt_data_callback_t bt_data_callback = nullptr;
 unordered_map<uint8_t, vector<uint8_t> > feature_data;
 static queue<vector<uint8_t> > send_queue;
 static critical_section_t queue_lock;
-uint32_t inactive_time = 0; // 手柄长时间静默
+static uint32_t inactive_time = 0;
+static uint8_t prev_input_state[10] = {};
 
 void bt_register_data_callback(bt_data_callback_t callback) {
     bt_data_callback = callback;
@@ -303,6 +304,10 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             hid_control_cid = 0;
             hid_interrupt_cid = 0;
             feature_data.clear();
+            critical_section_enter_blocking(&queue_lock);
+            while (!send_queue.empty()) send_queue.pop();
+            critical_section_exit(&queue_lock);
+            memset(prev_input_state, 0, sizeof(prev_input_state));
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
             printf("[HCI] Disconnected reason=0x%02X, start inquiry\n", reason);
             gap_inquiry_start(30);
@@ -324,9 +329,11 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
             if (mute[1]) { // 麦克风静音开启
                 return;
             }
-            if (packet[3] < 120 || packet[3] > 140) {
+            // Compare sticks, triggers, and button bytes to detect any input activity
+            if (memcmp(packet + 3, prev_input_state, sizeof(prev_input_state)) != 0) {
+                memcpy(prev_input_state, packet + 3, sizeof(prev_input_state));
                 inactive_time = time_us_32();
-            }else if (time_us_32() - inactive_time > 1800 * 1000 * 1000){
+            } else if (time_us_32() - inactive_time > 1800 * 1000 * 1000) {
                 printf("disconnect when inactive\n");
                 inactive_time = time_us_32();
                 bt_disconnect();
@@ -487,7 +494,7 @@ vector<uint8_t> get_feature_data(uint8_t reportId, uint16_t len) {
     if (!feature_data.contains(reportId) || reportId == 0x81) {
         if (hid_control_cid != 0) {
             uint8_t get_feature[] = {0x43, reportId};
-            l2cap_send(hid_control_cid, get_feature, len);
+            l2cap_send(hid_control_cid, get_feature, sizeof(get_feature));
             printf("[L2CAP] Requesting Get Feature Report 0x%02X\n", reportId);
         }
     }
